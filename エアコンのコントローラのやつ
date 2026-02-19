@@ -1,0 +1,226 @@
+import numpy as np
+import cv2
+import trimesh
+from skimage import measure
+from rembg import remove
+from PIL import Image
+
+class Interactive_VisualHull:
+    def __init__(self, resolution=128):
+        self.res = resolution
+
+    def remove_background(self, img_cv):
+        """
+        AI(rembg)を使用して背景を削除し、マスクと背景透過画像を生成します。
+        """
+        img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        
+        result_pil = remove(pil_img)
+        result_np = np.array(result_pil)
+        
+        if result_np.shape[2] == 4:
+            mask_obj = result_np[:, :, 3]
+        else:
+            mask_obj = cv2.cvtColor(result_np, cv2.COLOR_RGB2GRAY)
+
+        _, mask_obj = cv2.threshold(mask_obj, 128, 255, cv2.THRESH_BINARY)
+        img_masked = cv2.bitwise_and(img_cv, img_cv, mask=mask_obj)
+        
+        return mask_obj, img_masked
+
+    def get_user_points(self, img_display, window_name="Select 2 Points"):
+        """
+        ユーザーが画像上で2点（上端・下端）をクリックして取得するGUI。
+        リセットボタンとEnterキーでの決定機能を追加。
+        """
+        points = []
+        
+        # 画面に収まるようにリサイズ（表示用のみ）
+        h, w = img_display.shape[:2]
+        max_dim = 800
+        scale = 1.0
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            display_scaled = cv2.resize(img_display, (int(w * scale), int(h * scale)))
+        else:
+            display_scaled = img_display.copy()
+
+        # リセットボタンの領域 (左上: x, y, 幅, 高さ)
+        btn_rect = (10, 10, 100, 40)
+
+        def draw_ui(img_base):
+            img_ui = img_base.copy()
+            # ボタン描画
+            bx, by, bw, bh = btn_rect
+            cv2.rectangle(img_ui, (bx, by), (bx + bw, by + bh), (200, 200, 200), -1)
+            cv2.rectangle(img_ui, (bx, by), (bx + bw, by + bh), (50, 50, 50), 2)
+            cv2.putText(img_ui, "RESET", (bx + 15, by + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            # 選択された点と線を描画
+            for p in points:
+                cv2.circle(img_ui, p, 5, (0, 0, 255), -1)
+            if len(points) == 2:
+                cv2.line(img_ui, points[0], points[1], (0, 255, 0), 2)
+                
+            return img_ui
+
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                bx, by, bw, bh = btn_rect
+                # クリック位置がボタンの領域内か判定
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    points.clear()
+                    print("点をリセットしました。")
+                else:
+                    if len(points) < 2:
+                        points.append((x, y))
+                
+                # 画面を更新
+                cv2.imshow(window_name, draw_ui(display_scaled))
+
+        cv2.namedWindow(window_name)
+        cv2.setMouseCallback(window_name, mouse_callback)
+
+        print(f"\n--- {window_name} ---")
+        print("物体の「上」となる基準点、次に「下」となる基準点の順に2ヶ所クリックしてください。")
+        print("・画面左上の「RESET」ボタンをクリックするか、[r]キーを押すと選び直せます。")
+        print("・2点を選んだ後、[Enter]キーを押すと決定して次へ進みます。")
+
+        cv2.imshow(window_name, draw_ui(display_scaled))
+        
+        while True:
+            key = cv2.waitKey(1) & 0xFF
+            if key == 13:  # Enterキー
+                if len(points) == 2:
+                    break
+                else:
+                    print("2点を選択してからEnterキーを押してください。")
+            elif key == ord('r'):  # rキーでもリセット
+                points.clear()
+                cv2.imshow(window_name, draw_ui(display_scaled))
+                print("点をリセットしました。")
+            elif key == 27:  # ESCキー
+                cv2.destroyAllWindows()
+                raise ValueError("キャンセルされました。")
+
+        cv2.destroyAllWindows()
+
+        p1 = (int(points[0][0] / scale), int(points[0][1] / scale))
+        p2 = (int(points[1][0] / scale), int(points[1][1] / scale))
+
+        return p1, p2
+
+    def rotate_image_and_mask(self, img, mask, angle):
+        h, w = img.shape[:2]
+        cX, cY = (w // 2, h // 2)
+
+        M = cv2.getRotationMatrix2D((cX, cY), angle, 1.0)
+        cos = np.abs(M[0, 0])
+        sin = np.abs(M[0, 1])
+
+        nW = int((h * sin) + (w * cos))
+        nH = int((h * cos) + (w * sin))
+
+        M[0, 2] += (nW / 2) - cX
+        M[1, 2] += (nH / 2) - cY
+
+        rotated_img = cv2.warpAffine(img, M, (nW, nH), borderValue=(255, 255, 255))
+        rotated_mask = cv2.warpAffine(mask, M, (nW, nH), borderValue=0)
+        
+        return rotated_img, rotated_mask
+
+    def align_and_process(self, image_path, window_name, debug_filename=None):
+        print(f"[{image_path}] 読み込み・AI背景削除中...")
+        img_cv = cv2.imread(image_path)
+        if img_cv is None:
+            raise FileNotFoundError(f"{image_path} が見つかりません。")
+
+        mask_obj, img_masked = self.remove_background(img_cv)
+        p1, p2 = self.get_user_points(img_masked, window_name)
+
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        distance = np.sqrt(dx**2 + dy**2)
+
+        theta = np.degrees(np.arctan2(dy, dx))
+        rot_angle = 90 - theta
+
+        print(f"[{image_path}] 垂直になるよう {rot_angle:.2f} 度回転させます...")
+        rotated_img, rotated_mask = self.rotate_image_and_mask(img_cv, mask_obj, rot_angle)
+
+        M_obj = cv2.moments(rotated_mask)
+        if M_obj["m00"] == 0:
+            raise ValueError(f"{image_path} の回転後画像から物体が見つかりません。")
+            
+        center_x = int(M_obj["m10"] / M_obj["m00"])
+        center_y = int(M_obj["m01"] / M_obj["m00"])
+
+        if debug_filename:
+            debug_img = rotated_img.copy()
+            contours, _ = cv2.findContours(rotated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)
+            cv2.circle(debug_img, (center_x, center_y), 8, (255, 0, 0), -1)
+            cv2.imwrite(debug_filename, debug_img)
+            print(f"  -> デバッグ画像保存: {debug_filename}")
+
+        return rotated_mask, (center_x, center_y), distance
+
+    def create_mesh(self, path_front, path_left, output_filename="output.glb"):
+        mask1, center1, dist1 = self.align_and_process(path_front, "Front Image", "debug_front.jpg")
+        mask2, center2, dist2 = self.align_and_process(path_left, "Left Image", "debug_left.jpg")
+        
+        print(f"\n正面の指定長さ: {dist1:.2f} px, 側面の指定長さ: {dist2:.2f} px")
+
+        if dist2 < 1.0:
+            raise ValueError("側面の指定した2点が近すぎます。")
+
+        scale_factor = dist1 / dist2
+        print(f"側面の拡大倍率: {scale_factor:.4f}")
+
+        print("3D構築中...")
+        voxel_range = 1.2
+        x, y, z = np.mgrid[-voxel_range:voxel_range:self.res*1j, 
+                           -voxel_range:voxel_range:self.res*1j, 
+                           -voxel_range:voxel_range:self.res*1j]
+        
+        voxels = np.ones(x.shape, dtype=bool)
+        h1, w1 = mask1.shape
+        norm_scale = min(h1, w1) / 2.0
+        
+        u1 = (x * norm_scale) + center1[0]
+        v1 = (y * -norm_scale) + center1[1]
+        
+        u2 = (z * norm_scale / scale_factor) + center2[0]
+        v2 = (y * -norm_scale / scale_factor) + center2[1]
+
+        def check_mask(mask, u, v):
+            h, w = mask.shape
+            u_idx = u.astype(int)
+            v_idx = v.astype(int)
+            valid = (u_idx >= 0) & (u_idx < w) & (v_idx >= 0) & (v_idx < h)
+            res = np.zeros(u.shape, dtype=bool)
+            res[valid] = mask[v_idx[valid], u_idx[valid]] > 0
+            return res
+
+        voxels &= check_mask(mask1, u1, v1)
+        voxels &= check_mask(mask2, u2, v2)
+
+        if not np.any(voxels):
+            raise ValueError("ボクセル消失。位置合わせに失敗しました。2点の指定位置を見直してください。")
+
+        verts, faces, normals, values = measure.marching_cubes(voxels, 0.5)
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+        mesh.apply_translation(-mesh.centroid)
+        mesh.export(output_filename)
+        print(f"成功: {output_filename} を出力しました。")
+
+if __name__ == "__main__":
+    FRONT_IMG = "front.jpg"
+    LEFT_IMG = "left.jpg"
+    
+    try:
+        converter = Interactive_VisualHull(resolution=128)
+        converter.create_mesh(FRONT_IMG, LEFT_IMG, "my_interactive_model.glb")
+    except Exception as e:
+        print(f"\nエラーが発生しました: {e}")
