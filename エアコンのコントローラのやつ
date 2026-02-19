@@ -1,3 +1,4 @@
+
 import numpy as np
 import cv2
 import trimesh
@@ -145,7 +146,8 @@ class Interactive_VisualHull:
         rot_angle = 90 - theta
 
         print(f"[{image_path}] 垂直になるよう {rot_angle:.2f} 度回転させます...")
-        rotated_img, rotated_mask = self.rotate_image_and_mask(img_cv, mask_obj, rot_angle)
+        # 【変更点】元の画像ではなく、背景透過済みの画像(img_masked)を回転させて色情報として使います
+        rotated_img, rotated_mask = self.rotate_image_and_mask(img_masked, mask_obj, rot_angle)
 
         M_obj = cv2.moments(rotated_mask)
         if M_obj["m00"] == 0:
@@ -162,11 +164,12 @@ class Interactive_VisualHull:
             cv2.imwrite(debug_filename, debug_img)
             print(f"  -> デバッグ画像保存: {debug_filename}")
 
-        return rotated_mask, (center_x, center_y), distance
+        # 【変更点】着色用に回転済みのカラー画像(rotated_img)も返すようにしました
+        return rotated_img, rotated_mask, (center_x, center_y), distance
 
     def create_mesh(self, path_front, path_left, output_filename="output.glb"):
-        mask1, center1, dist1 = self.align_and_process(path_front, "Front Image", "debug_front.jpg")
-        mask2, center2, dist2 = self.align_and_process(path_left, "Left Image", "debug_left.jpg")
+        img1, mask1, center1, dist1 = self.align_and_process(path_front, "Front Image", "debug_front.jpg")
+        img2, mask2, center2, dist2 = self.align_and_process(path_left, "Left Image", "debug_left.jpg")
         
         print(f"\n正面の指定長さ: {dist1:.2f} px, 側面の指定長さ: {dist2:.2f} px")
 
@@ -184,6 +187,7 @@ class Interactive_VisualHull:
         
         voxels = np.ones(x.shape, dtype=bool)
         h1, w1 = mask1.shape
+        h2, w2 = mask2.shape
         norm_scale = min(h1, w1) / 2.0
         
         u1 = (x * norm_scale) + center1[0]
@@ -215,10 +219,50 @@ class Interactive_VisualHull:
         
         # 法線の向きを修正して、面が透ける現象を防止
         trimesh.repair.fix_normals(mesh)
+
+        # ---------------------------------------------------------
+        # 【新規追加】画像の色を3Dモデルに投影（頂点カラーの計算）
+        # ---------------------------------------------------------
+        print("表面に画像の模様を焼き付け中...")
+
+        # 1. 頂点インデックスを実際の物理座標 [-voxel_range, voxel_range] に戻す
+        vx = (verts[:, 0] - 1) / (self.res - 1) * (2 * voxel_range) - voxel_range
+        vy = (verts[:, 1] - 1) / (self.res - 1) * (2 * voxel_range) - voxel_range
+        vz = (verts[:, 2] - 1) / (self.res - 1) * (2 * voxel_range) - voxel_range
+
+        # 2. 各頂点が正面画像・側面画像のどのピクセル(U, V)に対応するか計算
+        uv1_u = (vx * norm_scale) + center1[0]
+        uv1_v = (vy * -norm_scale) + center1[1]
+        uv2_u = (vz * norm_scale / scale_factor) + center2[0]
+        uv2_v = (vy * -norm_scale / scale_factor) + center2[1]
+
+        # 3. 画像の範囲内にクリップ（はみ出し防止）
+        uv1_u = np.clip(np.round(uv1_u).astype(int), 0, w1 - 1)
+        uv1_v = np.clip(np.round(uv1_v).astype(int), 0, h1 - 1)
+        uv2_u = np.clip(np.round(uv2_u).astype(int), 0, w2 - 1)
+        uv2_v = np.clip(np.round(uv2_v).astype(int), 0, h2 - 1)
+
+        # 4. OpenCV(BGR)の配列から色を取得し、Trimesh用(RGB)に変換
+        colors_front = img1[uv1_v, uv1_u][:, ::-1]
+        colors_left  = img2[uv2_v, uv2_u][:, ::-1]
+
+        # 5. 面の向いている方向（法線）に応じて、正面と側面どちらの色を採用するか決める
+        mesh_normals = mesh.vertex_normals
+        weight_z = np.abs(mesh_normals[:, 2]) # 前後方向への傾き
+        weight_x = np.abs(mesh_normals[:, 0]) # 左右方向への傾き
+        
+        # Z軸（前後）への傾きが大きければ正面画像、X軸（左右）への傾きが大きければ側面画像
+        use_front = weight_z > weight_x
+        final_colors = np.where(use_front[:, None], colors_front, colors_left)
+
+        # 6. アルファチャンネル（不透明度255）を追加して RGBA にし、メッシュに適用
+        alpha = np.full((len(final_colors), 1), 255, dtype=np.uint8)
+        mesh.visual.vertex_colors = np.hstack((final_colors, alpha))
+        # ---------------------------------------------------------
         
         mesh.apply_translation(-mesh.centroid)
         mesh.export(output_filename)
-        print(f"成功: {output_filename} を出力しました。")
+        print(f"成功: {output_filename} を出力しました。Windowsの3DビューアーやBlender等で色付きで確認できます。")
 
 if __name__ == "__main__":
     FRONT_IMG = "front.jpg"
