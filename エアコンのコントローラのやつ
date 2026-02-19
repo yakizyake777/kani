@@ -6,7 +6,8 @@ from rembg import remove
 from PIL import Image
 
 class Interactive_VisualHull:
-    def __init__(self, resolution=128):
+    def __init__(self, resolution=256):
+        # 解像度を256に引き上げ、薄い物体の表現力を向上
         self.res = resolution
 
     def remove_background(self, img_cv):
@@ -32,11 +33,10 @@ class Interactive_VisualHull:
     def get_user_points(self, img_display, window_name="Select 2 Points"):
         """
         ユーザーが画像上で2点（上端・下端）をクリックして取得するGUI。
-        リセットボタンとEnterキーでの決定機能を追加。
+        リセットボタンとEnterキーでの決定機能を搭載。
         """
         points = []
         
-        # 画面に収まるようにリサイズ（表示用のみ）
         h, w = img_display.shape[:2]
         max_dim = 800
         scale = 1.0
@@ -46,18 +46,15 @@ class Interactive_VisualHull:
         else:
             display_scaled = img_display.copy()
 
-        # リセットボタンの領域 (左上: x, y, 幅, 高さ)
         btn_rect = (10, 10, 100, 40)
 
         def draw_ui(img_base):
             img_ui = img_base.copy()
-            # ボタン描画
             bx, by, bw, bh = btn_rect
             cv2.rectangle(img_ui, (bx, by), (bx + bw, by + bh), (200, 200, 200), -1)
             cv2.rectangle(img_ui, (bx, by), (bx + bw, by + bh), (50, 50, 50), 2)
             cv2.putText(img_ui, "RESET", (bx + 15, by + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
             
-            # 選択された点と線を描画
             for p in points:
                 cv2.circle(img_ui, p, 5, (0, 0, 255), -1)
             if len(points) == 2:
@@ -68,7 +65,6 @@ class Interactive_VisualHull:
         def mouse_callback(event, x, y, flags, param):
             if event == cv2.EVENT_LBUTTONDOWN:
                 bx, by, bw, bh = btn_rect
-                # クリック位置がボタンの領域内か判定
                 if bx <= x <= bx + bw and by <= y <= by + bh:
                     points.clear()
                     print("点をリセットしました。")
@@ -76,7 +72,6 @@ class Interactive_VisualHull:
                     if len(points) < 2:
                         points.append((x, y))
                 
-                # 画面を更新
                 cv2.imshow(window_name, draw_ui(display_scaled))
 
         cv2.namedWindow(window_name)
@@ -91,16 +86,16 @@ class Interactive_VisualHull:
         
         while True:
             key = cv2.waitKey(1) & 0xFF
-            if key == 13:  # Enterキー
+            if key == 13:  # Enter
                 if len(points) == 2:
                     break
                 else:
                     print("2点を選択してからEnterキーを押してください。")
-            elif key == ord('r'):  # rキーでもリセット
+            elif key == ord('r'):  # rキー
                 points.clear()
                 cv2.imshow(window_name, draw_ui(display_scaled))
                 print("点をリセットしました。")
-            elif key == 27:  # ESCキー
+            elif key == 27:  # ESC
                 cv2.destroyAllWindows()
                 raise ValueError("キャンセルされました。")
 
@@ -112,6 +107,9 @@ class Interactive_VisualHull:
         return p1, p2
 
     def rotate_image_and_mask(self, img, mask, angle):
+        """
+        はみ出しを防ぎながら画像とマスクを回転させます。
+        """
         h, w = img.shape[:2]
         cX, cY = (w // 2, h // 2)
 
@@ -209,8 +207,15 @@ class Interactive_VisualHull:
         if not np.any(voxels):
             raise ValueError("ボクセル消失。位置合わせに失敗しました。2点の指定位置を見直してください。")
 
-        verts, faces, normals, values = measure.marching_cubes(voxels, 0.5)
+        # ボクセル空間の周囲を False でパディングし、平面の消失を防ぐ
+        voxels_padded = np.pad(voxels, pad_width=1, mode='constant', constant_values=False)
+
+        verts, faces, normals, values = measure.marching_cubes(voxels_padded, 0.5)
         mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+        
+        # 法線の向きを修正して、面が透ける現象を防止
+        trimesh.repair.fix_normals(mesh)
+        
         mesh.apply_translation(-mesh.centroid)
         mesh.export(output_filename)
         print(f"成功: {output_filename} を出力しました。")
@@ -220,7 +225,7 @@ if __name__ == "__main__":
     LEFT_IMG = "left.jpg"
     
     try:
-        converter = Interactive_VisualHull(resolution=128)
+        converter = Interactive_VisualHull(resolution=256)
         converter.create_mesh(FRONT_IMG, LEFT_IMG, "my_interactive_model.glb")
     except Exception as e:
         print(f"\nエラーが発生しました: {e}")
