@@ -4,7 +4,6 @@ import { useGLTF, OrbitControls, Stage, Html, ContactShadows } from '@react-thre
 import * as THREE from 'three';
 import axios from 'axios';
 
-// 3Dモデルを表示・設定を反映するコンポーネント
 function Model({ url, settings, mode }) {
   const { scene } = useGLTF(url);
 
@@ -38,7 +37,10 @@ function Model({ url, settings, mode }) {
 }
 
 export default function App() {
-  const [image, setImage] = useState(null);
+  // 🌟 1. 画像ステートを2つに増やす
+  const [image1, setImage1] = useState(null);
+  const [image2, setImage2] = useState(null);
+  
   const [modelUrl, setModelUrl] = useState(null);
   const [loading, setLoading] = useState(false);
   const [activeMode, setActiveMode] = useState('original');
@@ -46,7 +48,7 @@ export default function App() {
 
   const [settings, setSettings] = useState({
     color: '#ffffff',
-    bgColor: '#111111', // ⬅️ 背景色の初期値を追加
+    bgColor: '#111111',
     metalness: 0.2,
     roughness: 0.8,
     opacity: 1.0,
@@ -76,10 +78,15 @@ export default function App() {
   };
 
   const uploadAndGenerate = async () => {
-    if (!image) return alert("画像を選んでください");
+    // 🌟 2. 両方の画像が選ばれているか確認
+    if (!image1 || !image2) return alert("画像を2枚とも選んでください");
+    
     setLoading(true);
     const formData = new FormData();
-    formData.append('image', image);
+    // 🌟 3. 両方の画像をFormDataに追加する
+    formData.append('image1', image1);
+    formData.append('image2', image2);
+
     try {
       const response = await axios.post(
         'https://unstrategical-rubi-nonliterary.ngrok-free.dev/generate', 
@@ -101,10 +108,19 @@ export default function App() {
     <div style={{ width: '100vw', height: '100vh', background: '#111', color: 'white', display: 'flex', overflow: 'hidden' }}>
       
       <div style={{ width: '340px', background: '#1a1a1a', padding: '20px', overflowY: 'auto', borderRight: '1px solid #333', zIndex: 10 }}>
-        <h2 style={{ fontSize: '1.2rem', marginBottom: '20px' }}>💎 3D Pro Editor</h2>
+        <h2 style={{ fontSize: '1.2rem', marginBottom: '20px' }}>3D view</h2>
         
-        <section style={{ marginBottom: '25px' }}>
-          <input type="file" onChange={(e) => setImage(e.target.files[0])} style={{ width: '100%', fontSize: '12px' }} />
+        <section style={{ marginBottom: '25px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {/* 🌟 4. 入力欄を2つに増やす */}
+          <div>
+            <p style={{fontSize: '11px', color: '#aaa', marginBottom: '5px'}}>画像1 (正面)</p>
+            <input type="file" onChange={(e) => setImage1(e.target.files[0])} style={{ width: '100%', fontSize: '12px' }} />
+          </div>
+          <div>
+            <p style={{fontSize: '11px', color: '#aaa', marginBottom: '5px'}}>画像2 (側面)</p>
+            <input type="file" onChange={(e) => setImage2(e.target.files[0])} style={{ width: '100%', fontSize: '12px' }} />
+          </div>
+
           <button onClick={uploadAndGenerate} disabled={loading} style={mainBtnStyle(loading)}>
             {loading ? '生成中...' : '3Dモデル生成'}
           </button>
@@ -112,8 +128,6 @@ export default function App() {
 
         {modelUrl && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-            
-            {/* 背景設定（新設） */}
             <section style={{ background: '#252525', padding: '15px', borderRadius: '10px' }}>
               <p style={labelStyle}>背景設定</p>
               <label style={{ fontSize: '13px', display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -173,9 +187,7 @@ export default function App() {
 
       <div style={{ flex: 1, position: 'relative' }}>
         <Canvas shadows camera={{ position: [0, 0, 4] }}>
-          {/* 🌟 背景色を反映するタグを追加 */}
           <color attach="background" args={[settings.bgColor]} />
-          
           <Suspense fallback={<Html center><div style={{color: 'white'}}>Loading...</div></Html>}>
             <Stage environment={settings.environment} intensity={settings.intensity} contactShadow={false}>
               {modelUrl && <Model url={modelUrl} settings={settings} mode={activeMode} />}
