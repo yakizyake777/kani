@@ -2,24 +2,25 @@ import numpy as np
 import cv2
 import trimesh
 import boto3
+import json
 from skimage import measure
 from rembg import remove
 from PIL import Image
-# 一番上のimport部分に追記
 from botocore.exceptions import NoCredentialsError
 
+# Webサーバー(API)化するためのライブラリ
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-
+app = Flask(__name__)
+# React(別ドメイン)からの通信を許可する設定
+CORS(app)
 
 class Interactive_VisualHull:
     def __init__(self, resolution=256):
-        # 解像度を256に引き上げ、薄い物体の表現力を向上
         self.res = resolution
 
     def remove_background(self, img_cv):
-        """
-        AI(rembg)を使用して背景を削除し、マスクと背景透過画像を生成します。
-        """
         img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(img_rgb)
         
@@ -36,96 +37,7 @@ class Interactive_VisualHull:
         
         return mask_obj, img_masked
 
-    def get_user_points(self, img_display, window_name="Select 2 Points"):
-        """
-        ユーザーが画像上で2点（上端・下端）をクリックして取得するGUI。
-        画像下部に専用のUI領域（コントロールバー）を設けてボタンの被りを防止。
-        """
-        points = []
-        
-        h, w = img_display.shape[:2]
-        max_dim = 800
-        scale = 1.0
-        if max(h, w) > max_dim:
-            scale = max_dim / max(h, w)
-            display_scaled = cv2.resize(img_display, (int(w * scale), int(h * scale)))
-        else:
-            display_scaled = img_display.copy()
-
-        sh, sw = display_scaled.shape[:2]
-        ui_height = 60
-        canvas_w = max(sw, 150) # ボタンが収まる最低幅を確保
-        
-        # UI領域の中央にボタンを配置
-        btn_rect = (canvas_w // 2 - 50, sh + 10, 100, 40)
-
-        def draw_ui(img_base):
-            # 画像の下にUI用のグレーの領域を追加したキャンバスを作成
-            canvas = np.full((sh + ui_height, canvas_w, 3), 50, dtype=np.uint8)
-            canvas[0:sh, 0:sw] = img_base
-            
-            bx, by, bw, bh = btn_rect
-            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh), (200, 200, 200), -1)
-            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh), (50, 50, 50), 2)
-            cv2.putText(canvas, "RESET", (bx + 15, by + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            
-            for p in points:
-                cv2.circle(canvas, p, 5, (0, 0, 255), -1)
-            if len(points) == 2:
-                cv2.line(canvas, points[0], points[1], (0, 255, 0), 2)
-                
-            return canvas
-
-        def mouse_callback(event, x, y, flags, param):
-            if event == cv2.EVENT_LBUTTONDOWN:
-                bx, by, bw, bh = btn_rect
-                # ボタン領域のクリック判定
-                if bx <= x <= bx + bw and by <= y <= by + bh:
-                    points.clear()
-                    print("点をリセットしました。")
-                # 画像領域内のクリック判定のみ受け付ける
-                elif 0 <= x < sw and 0 <= y < sh:
-                    if len(points) < 2:
-                        points.append((x, y))
-                
-                cv2.imshow(window_name, draw_ui(display_scaled))
-
-        cv2.namedWindow(window_name)
-        cv2.setMouseCallback(window_name, mouse_callback)
-
-        print(f"\n--- {window_name} ---")
-        print("物体の「上」となる基準点、次に「下」となる基準点の順に2ヶ所クリックしてください。")
-        print("・画面下部の「RESET」ボタンをクリックするか、[r]キーを押すと選び直せます。")
-        print("・2点を選んだ後、[Enter]キーを押すと決定して次へ進みます。")
-
-        cv2.imshow(window_name, draw_ui(display_scaled))
-        
-        while True:
-            key = cv2.waitKey(1) & 0xFF
-            if key == 13:  # Enter
-                if len(points) == 2:
-                    break
-                else:
-                    print("2点を選択してからEnterキーを押してください。")
-            elif key == ord('r'):  # rキー
-                points.clear()
-                cv2.imshow(window_name, draw_ui(display_scaled))
-                print("点をリセットしました。")
-            elif key == 27:  # ESC
-                cv2.destroyAllWindows()
-                raise ValueError("キャンセルされました。")
-
-        cv2.destroyAllWindows()
-
-        p1 = (int(points[0][0] / scale), int(points[0][1] / scale))
-        p2 = (int(points[1][0] / scale), int(points[1][1] / scale))
-
-        return p1, p2
-
     def rotate_image_and_mask(self, img, mask, angle):
-        """
-        はみ出しを防ぎながら画像とマスクを回転させます。
-        """
         h, w = img.shape[:2]
         cX, cY = (w // 2, h // 2)
 
@@ -144,14 +56,13 @@ class Interactive_VisualHull:
         
         return rotated_img, rotated_mask
 
-    def align_and_process(self, image_path, window_name, debug_filename=None):
-        print(f"[{image_path}] 読み込み・AI背景削除中...")
-        img_cv = cv2.imread(image_path)
-        if img_cv is None:
-            raise FileNotFoundError(f"{image_path} が見つかりません。")
-
+    # ★変更点：GUIで座標を取るのではなく、Reactから受け取った points を使うように変更
+    def align_and_process(self, img_cv, points):
         mask_obj, img_masked = self.remove_background(img_cv)
-        p1, p2 = self.get_user_points(img_masked, window_name)
+        
+        # Reactから受け取った座標 [ [x1, y1], [x2, y2] ] をタプルに変換
+        p1 = (int(points[0][0]), int(points[0][1]))
+        p2 = (int(points[1][0]), int(points[1][1]))
 
         dx = p2[0] - p1[0]
         dy = p2[1] - p1[1]
@@ -160,41 +71,27 @@ class Interactive_VisualHull:
         theta = np.degrees(np.arctan2(dy, dx))
         rot_angle = 90 - theta
 
-        print(f"[{image_path}] 垂直になるよう {rot_angle:.2f} 度回転させます...")
         rotated_img, rotated_mask = self.rotate_image_and_mask(img_masked, mask_obj, rot_angle)
 
         M_obj = cv2.moments(rotated_mask)
         if M_obj["m00"] == 0:
-            raise ValueError(f"{image_path} の回転後画像から物体が見つかりません。")
+            raise ValueError("回転後画像から物体が見つかりません。")
             
         center_x = int(M_obj["m10"] / M_obj["m00"])
         center_y = int(M_obj["m01"] / M_obj["m00"])
 
-        if debug_filename:
-            debug_img = rotated_img.copy()
-            contours, _ = cv2.findContours(rotated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)
-            cv2.circle(debug_img, (center_x, center_y), 8, (255, 0, 0), -1)
-            cv2.imwrite(debug_filename, debug_img)
-            print(f"  -> デバッグ画像保存: {debug_filename}")
-
         return rotated_img, rotated_mask, (center_x, center_y), distance
 
-    def create_mesh(self, path_front, path_left, output_filename="output.glb"):
-        img1, mask1, center1, dist1 = self.align_and_process(path_front, "Front Image", "debug_front.jpg")
-        img2, mask2, center2, dist2 = self.align_and_process(path_left, "Left Image", "debug_left.jpg")
+    # ★変更点：ファイルパスではなく、画像データ(配列)と座標データを直接受け取る
+    def create_mesh_api(self, img1_cv, img2_cv, pts1, pts2, output_filename="output.glb"):
+        img1, mask1, center1, dist1 = self.align_and_process(img1_cv, pts1)
+        img2, mask2, center2, dist2 = self.align_and_process(img2_cv, pts2)
         
-        print(f"\n正面の指定長さ: {dist1:.2f} px, 側面の指定長さ: {dist2:.2f} px")
-
         if dist2 < 1.0:
             raise ValueError("側面の指定した2点が近すぎます。")
 
         scale_factor = dist1 / dist2
-        print(f"側面の拡大倍率: {scale_factor:.4f}")
-
-        print("3D構築中...")
         
-        # ボクセル空間の見切れによる「平面化」を防ぐ動的スケーリング
         h1, w1 = mask1.shape
         h2, w2 = mask2.shape
         
@@ -209,8 +106,6 @@ class Interactive_VisualHull:
         voxel_range = max(max_x, max_y1, max_z, max_y2) * 1.1
         norm_scale = base_scale
         
-        print(f"ボクセル範囲を自動調整しました: ±{voxel_range:.2f}")
-
         x, y, z = np.mgrid[-voxel_range:voxel_range:self.res*1j, 
                            -voxel_range:voxel_range:self.res*1j, 
                            -voxel_range:voxel_range:self.res*1j]
@@ -236,21 +131,14 @@ class Interactive_VisualHull:
         voxels &= check_mask(mask2, u2, v2)
 
         if not np.any(voxels):
-            raise ValueError("ボクセル消失。位置合わせに失敗しました。2点の指定位置を見直してください。")
+            raise ValueError("ボクセル消失。2点の指定位置を見直してください。")
 
         voxels_padded = np.pad(voxels, pad_width=1, mode='constant', constant_values=False)
 
         verts, faces, normals, values = measure.marching_cubes(voxels_padded, 0.5)
         mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-        
         trimesh.repair.fix_normals(mesh)
-
-        # 2視点特有の角張りを丸めるスムージング処理
-        print("モデルの形状を丸めて自然にしています...")
         trimesh.smoothing.filter_taubin(mesh, iterations=15)
-
-        # 画像の色を3Dモデルに投影（頂点カラーの計算）
-        print("表面に画像の模様を焼き付け中...")
 
         vx = (verts[:, 0] - 1) / (self.res - 1) * (2 * voxel_range) - voxel_range
         vy = (verts[:, 1] - 1) / (self.res - 1) * (2 * voxel_range) - voxel_range
@@ -281,22 +169,16 @@ class Interactive_VisualHull:
         
         mesh.apply_translation(-mesh.centroid)
         mesh.export(output_filename)
-        print(f"成功: {output_filename} を出力しました。Windowsの3DビューアーやBlender等で色付きで確認できます。")
-# S3アップロード用の関数を追加 (main関数の上あたりに配置)
+
+
 def upload_to_s3(local_file_path, bucket_name, s3_file_name):
-    print(f"\nAWS S3へアップロードしています: {s3_file_name} ...")
+    print(f"AWS S3へアップロードしています: {s3_file_name} ...")
     
-    # ステップ3で取得したキーをここに入力
-    ACCESS_KEY = 'AKIAU6CECEO3KRREXMF6'
-    SECRET_KEY = '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'
     
     s3 = boto3.client('s3', 
-                      aws_access_key_id=ACCESS_KEY,
-                      aws_secret_access_key=SECRET_KEY,
-                      region_name='ap-northeast-1') # 東京リージョンの場合
+                      region_name='ap-northeast-1')
 
     try:
-        # GLBファイルとして正しい形式(ContentType)でアップロード
         s3.upload_file(
             local_file_path, 
             bucket_name, 
@@ -304,32 +186,63 @@ def upload_to_s3(local_file_path, bucket_name, s3_file_name):
             ExtraArgs={'ContentType': 'model/gltf-binary'}
         )
         url = f"https://{bucket_name}.s3.amazonaws.com/{s3_file_name}"
-        print(f"アップロード完了！\n公開URL: {url}")
         return url
     except Exception as e:
         print(f"アップロード失敗: {e}")
         return None
-if __name__ == "__main__":
-    FRONT_IMG = "front.jpg"
-    LEFT_IMG = "left.jpg"
-    OUTPUT_GLB = "my_interactive_model.glb"
-    
-    # ★ ご自身で作成したS3のバケット名に書き換えてください ★
-    BUCKET_NAME = "my-3d-modeling-bucket" 
-    
+
+
+# ==============================================================
+# Web API エンドポイントの設定
+# ==============================================================
+@app.route('/generate', methods=['POST'])
+def generate_endpoint():
     try:
-        # 1. ローカルで3Dモデルを生成
+        # 1. Reactから送られた画像ファイルを受け取る
+        file1 = request.files.get('image1')
+        file2 = request.files.get('image2')
+        if not file1 or not file2:
+            return jsonify({"error": "画像が不足しています"}), 400
+
+        # メモリ上で画像をOpenCV形式に変換
+        img1_cv = cv2.imdecode(np.frombuffer(file1.read(), np.uint8), cv2.IMREAD_COLOR)
+        img2_cv = cv2.imdecode(np.frombuffer(file2.read(), np.uint8), cv2.IMREAD_COLOR)
+
+        # 2. Reactから送られた座標(JSON)を受け取ってPythonのリストに変換
+        # React側から JSON.stringify されて送られてくる例: "[[100, 200], [100, 800]]"
+        pts1 = json.loads(request.form.get('points1', '[]'))
+        pts2 = json.loads(request.form.get('points2', '[]'))
+
+        if len(pts1) != 2 or len(pts2) != 2:
+            return jsonify({"error": "座標データが正しくありません"}), 400
+
+        print(f"画像1座標: {pts1}, 画像2座標: {pts2}")
+
+        # 3. モデリング処理の実行
+        output_glb = "my_interactive_model.glb"
         converter = Interactive_VisualHull(resolution=256)
-        converter.create_mesh(FRONT_IMG, LEFT_IMG, OUTPUT_GLB)
-        
-        # 2. 生成したモデルをAWS S3へアップロード
-        s3_url = upload_to_s3(OUTPUT_GLB, BUCKET_NAME, "latest_model.glb")
-        
+        converter.create_mesh_api(img1_cv, img2_cv, pts1, pts2, output_glb)
+
+        # 4. S3へアップロード
+        bucket_name = "my-3d-modeling-bucket" # ★あなたのS3バケット名
+        s3_url = upload_to_s3(output_glb, bucket_name, "latest_model.glb")
+
         if s3_url:
-            print("\n==================================")
-            print("kani-visual 側で以下のURLを読み込んでください:")
-            print(s3_url)
-            print("==================================")
-            
+            # ★成功したらReactへURLを返す
+            return jsonify({
+                "message": "成功",
+                "glb_url": s3_url
+            }), 200
+        else:
+            return jsonify({"error": "S3アップロードに失敗しました"}), 500
+
     except Exception as e:
-        print(f"\nエラーが発生しました: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == "__main__":
+    # Flaskサーバーの起動 (ポート5000)
+    print("Webサーバーを起動します。ngrok等のURLと連携してください。")
+    app.run(host='0.0.0.0', port=5000, debug=True)
