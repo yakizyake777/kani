@@ -303,7 +303,7 @@ def upload_to_s3(local_file_path, bucket_name, s3_file_name):
             s3_file_name,
             ExtraArgs={'ContentType': 'model/gltf-binary'}
         )
-        url = f"https://{bucket_name}.s3.ap-northeast-1.amazonaws.com/{s3_file_name}"
+        url = f"https://{bucket_name}.s3.amazonaws.com/{s3_file_name}"
         print(f"アップロード完了！\n公開URL: {url}")
         return url
     except Exception as e:
